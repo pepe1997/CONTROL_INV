@@ -187,33 +187,76 @@ function consolidarInventario(rows) {
     const partes = parseUbicacion(ubicacion);
     if (!codigo || !ubicacion || !partes || partes.pasillo === CONFIG.PASILLO_EXCLUIDO) return;
     const info = productoInfo(codigo, row);
-    const key = `${codigo}|${ubicacion}`;
+    const unidades = num(campo(row, ["UNACT", "UnAct", "UN ACT", "UNIDADES"]));
+    const asignadas = num(campo(row, ["UNI_ASIG", "UN_ASIG", "Un Asig", "UN ASIG", "UNIDADES ASIGNADAS"]));
+    const transitoUnd = num(campo(row, ["En las Unidades de TrÃ¡nsito", "En las Unidades de Tránsito", "TRANSITO", "Transito", "UN_TRANSITO", "UN TRANSITO"]));
+    const bultos = info.uxb ? unidades / info.uxb : unidades;
+    const transitoBultos = info.uxb ? transitoUnd / info.uxb : transitoUnd;
+    const key = normalizar(ubicacion);
     if (!mapa.has(key)) {
       mapa.set(key, {
         id: key,
-        codigo,
-        codAlt: info.codAlt,
-        estilo: info.estilo,
-        descripcion: info.descripcion,
         ubicacion,
         pasillo: partes.pasillo,
         bahia: partes.bahia,
         uxb: info.uxb,
         unidades: 0,
         asignadas: 0,
-        transitoUnd: 0
+        transitoUnd: 0,
+        bultos: 0,
+        transitoBultos: 0,
+        filas: 0,
+        productos: new Map()
       });
     }
     const item = mapa.get(key);
-    item.unidades += num(campo(row, ["UNACT", "UnAct", "UN ACT", "UNIDADES"]));
-    item.asignadas += num(campo(row, ["UNI_ASIG", "UN_ASIG", "Un Asig", "UN ASIG", "UNIDADES ASIGNADAS"]));
-    item.transitoUnd += num(campo(row, ["En las Unidades de TrÃ¡nsito", "En las Unidades de Tránsito", "TRANSITO", "Transito", "UN_TRANSITO", "UN TRANSITO"]));
+    item.unidades += unidades;
+    item.asignadas += asignadas;
+    item.transitoUnd += transitoUnd;
+    item.bultos += bultos;
+    item.transitoBultos += transitoBultos;
+    item.filas += 1;
+    if (!item.productos.has(codigo)) {
+      item.productos.set(codigo, {
+        codigo,
+        codAlt: info.codAlt,
+        estilo: info.estilo,
+        descripcion: info.descripcion,
+        uxb: info.uxb,
+        unidades: 0,
+        asignadas: 0,
+        transitoUnd: 0,
+        bultos: 0,
+        transitoBultos: 0
+      });
+    }
+    const prod = item.productos.get(codigo);
+    prod.unidades += unidades;
+    prod.asignadas += asignadas;
+    prod.transitoUnd += transitoUnd;
+    prod.bultos += bultos;
+    prod.transitoBultos += transitoBultos;
   });
-  return Array.from(mapa.values()).map(item => ({
-    ...item,
-    bultos: item.uxb ? item.unidades / item.uxb : item.unidades,
-    transitoBultos: item.uxb ? item.transitoUnd / item.uxb : item.transitoUnd
-  })).sort((a, b) => compararUbicacion(a.ubicacion, b.ubicacion) || a.codigo.localeCompare(b.codigo));
+  return Array.from(mapa.values()).map(item => {
+    const productosDetalle = Array.from(item.productos.values())
+      .sort((a, b) => b.bultos - a.bultos || a.codigo.localeCompare(b.codigo));
+    const principal = productosDetalle[0] || {};
+    const codigos = productosDetalle.map(p => p.codigo).filter(Boolean);
+    const estilos = productosDetalle.map(p => p.estilo).filter(Boolean);
+    return {
+      ...item,
+      productos: undefined,
+      productosDetalle,
+      productosTotal: productosDetalle.length,
+      codigo: codigos.join(" / "),
+      codAlt: productosDetalle.map(p => p.codAlt).filter(Boolean).join(" / "),
+      estilo: estilos.join(" / "),
+      descripcion: productosDetalle.length > 1
+        ? `${productosDetalle.length} productos compartidos`
+        : (principal.descripcion || ""),
+      uxb: principal.uxb || item.uxb || 1
+    };
+  }).sort((a, b) => compararUbicacion(a.ubicacion, b.ubicacion) || String(a.codigo).localeCompare(String(b.codigo)));
 }
 
 function guardarCacheData() {
@@ -413,6 +456,8 @@ function validacionConInventario(item) {
     codAlt: item.codAlt,
     estilo: item.estilo,
     descripcion: item.descripcion,
+    productosTotal: item.productosTotal || 1,
+    productosDetalle: item.productosDetalle || [],
     bultos: item.bultos,
     unidades: item.unidades,
     asignadas: item.asignadas,
@@ -462,6 +507,15 @@ function validacionIncidenciaHtml(row) {
   `;
 }
 
+function etiquetaProductoUbicacion(item) {
+  if (Number(item.productosTotal || 0) <= 1) {
+    return `${html(item.codigo)}${item.estilo ? ` | ${html(item.estilo)}` : ""}`;
+  }
+  const codigos = (item.productosDetalle || []).slice(0, 3).map(p => p.codigo).join(" / ");
+  const resto = item.productosTotal > 3 ? ` +${item.productosTotal - 3}` : "";
+  return `${fmt(item.productosTotal)} productos compartidos${codigos ? ` | ${html(codigos)}${resto}` : ""}`;
+}
+
 async function marcar(id, estado, observacion = null, extras = {}) {
   const item = ubicaciones.find(u => u.id === id);
   if (!item) return;
@@ -478,6 +532,8 @@ async function marcar(id, estado, observacion = null, extras = {}) {
     codAlt: item.codAlt,
     estilo: item.estilo,
     descripcion: item.descripcion,
+    productosTotal: item.productosTotal || 1,
+    productosDetalle: item.productosDetalle || [],
     bultos: item.bultos,
     unidades: item.unidades,
     asignadas: item.asignadas,
@@ -549,6 +605,8 @@ function cambiarObs(id, valor) {
     codAlt: item.codAlt,
     estilo: item.estilo,
     descripcion: item.descripcion,
+    productosTotal: item.productosTotal || 1,
+    productosDetalle: item.productosDetalle || [],
     bultos: item.bultos,
     unidades: item.unidades,
     asignadas: item.asignadas,
@@ -582,6 +640,8 @@ function filasExportables(pasillo = "") {
         codAlt: item.codAlt,
         estilo: item.estilo,
         descripcion: item.descripcion,
+        productosTotal: item.productosTotal || 1,
+        productosDetalle: (item.productosDetalle || []).map(p => `${p.codigo} ${p.estilo || p.descripcion || ""} (${fmt(p.bultos)} bul)`).join(" | "),
         bultosSistema: item.bultos,
         unidadesSistema: item.unidades,
         asignadas: item.asignadas,
@@ -600,7 +660,7 @@ function filasExportables(pasillo = "") {
 function descargarExcelInventario(pasillo = "") {
   const data = filasExportables(pasillo);
   const headers = [
-    "PASILLO", "BAHIA", "UBICACION", "CODIGO", "COD_ALT", "ESTILO", "DESCRIPCION",
+    "PASILLO", "BAHIA", "UBICACION", "CODIGO", "COD_ALT", "ESTILO", "DESCRIPCION", "PRODUCTOS_UBICACION", "DETALLE_PRODUCTOS",
     "BULTOS_SISTEMA", "UNIDADES_SISTEMA", "ASIGNADAS", "TRANSITO_BULTOS", "ESTADO",
     "DIF_BULTOS", "DIF_UNIDADES", "BULTOS_VALIDADOS", "UNIDADES_VALIDADAS", "OBSERVACION", "ACTUALIZADO"
   ];
@@ -610,6 +670,7 @@ function descargarExcelInventario(pasillo = "") {
       <td style="mso-number-format:'\\@'">${excelTexto(r.codigo)}</td>
       <td style="mso-number-format:'\\@'">${excelTexto(r.codAlt)}</td>
       <td>${excelTexto(r.estilo)}</td><td>${excelTexto(r.descripcion)}</td>
+      <td>${Number(r.productosTotal || 1)}</td><td>${excelTexto(r.productosDetalle)}</td>
       <td>${Number(r.bultosSistema || 0)}</td><td>${Number(r.unidadesSistema || 0)}</td><td>${Number(r.asignadas || 0)}</td>
       <td>${Number(r.transitoBultos || 0)}</td><td>${excelTexto(r.estado)}</td>
       <td>${Number(r.diferenciaBultos || 0)}</td><td>${Number(r.diferenciaUnidades || 0)}</td>
@@ -742,7 +803,7 @@ function cardMobile(item) {
         <strong>${html(item.ubicacion)}</strong>
         <span class="pill">${html(estado)}</span>
       </div>
-      <div class="product-code">${html(item.codigo)}${item.estilo ? ` | ${html(item.estilo)}` : ""}</div>
+      <div class="product-code">${etiquetaProductoUbicacion(item)}</div>
       <p class="desc">${html(item.descripcion || "Sin descripcion")}</p>
       <div class="metric-grid">
         <div class="metric"><span>Bultos</span><strong>${fmt(item.bultos)}</strong></div>
@@ -772,7 +833,7 @@ function modalCantidadHtml() {
           <button type="button" onclick="cerrarModalCantidad()">Cerrar</button>
         </header>
         <strong>${html(item.ubicacion)}</strong>
-        <p>${html(item.codigo)}${item.estilo ? ` | ${html(item.estilo)}` : ""}</p>
+        <p>${etiquetaProductoUbicacion(item)}</p>
         <div class="qty-grid">
           <label>Bultos
             <input id="modalBultos" type="number" min="0" step="0.01" inputmode="decimal" value="${html(modalCantidad.bultos)}" placeholder="0">
@@ -842,7 +903,7 @@ function renderMonitor() {
           <table class="issue-table">
             <thead><tr><th>Ubicacion</th><th>Producto</th><th>Estado</th><th>Validacion</th><th>Obs.</th></tr></thead>
             <tbody>
-              ${incidencias.map(v => `<tr class="${claseEstado(v.estado)}"><td><strong>${html(v.ubicacion)}</strong></td><td><div class="product-cell"><strong>${html(v.codigo)}</strong><span>${html(v.estilo || v.descripcion || "")}</span><small>Transito: ${fmt(v.transitoBultos || 0)} bul</small></div></td><td><span class="state-chip ${claseEstado(v.estado)}">${html(v.estado)}</span></td><td>${validacionIncidenciaHtml(v)}</td><td class="obs-cell">${html(v.observacion || "-")}</td></tr>`).join("") || `<tr><td colspan="5">Sin faltantes ni sobrantes.</td></tr>`}
+              ${incidencias.map(v => `<tr class="${claseEstado(v.estado)}"><td><strong>${html(v.ubicacion)}</strong></td><td><div class="product-cell"><strong>${etiquetaProductoUbicacion(v)}</strong><span>${html(v.descripcion || "")}</span><small>Transito: ${fmt(v.transitoBultos || 0)} bul</small></div></td><td><span class="state-chip ${claseEstado(v.estado)}">${html(v.estado)}</span></td><td>${validacionIncidenciaHtml(v)}</td><td class="obs-cell">${html(v.observacion || "-")}</td></tr>`).join("") || `<tr><td colspan="5">Sin faltantes ni sobrantes.</td></tr>`}
             </tbody>
           </table>
         </div>
