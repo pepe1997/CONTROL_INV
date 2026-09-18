@@ -7,7 +7,8 @@ const CONFIG = {
 const HEADERS = [
   "ID", "FECHA_HORA", "UBICACION", "PASILLO", "BAHIA", "CODIGO", "COD_ALT", "ESTILO",
   "DESCRIPCION", "BULTOS", "UNIDADES", "ASIGNADAS", "TRANSITO_UND", "TRANSITO_BULTOS",
-  "DIFERENCIA_BULTOS", "DIFERENCIA_UNIDADES", "TIPO_DIFERENCIA", "ESTADO", "OBSERVACION"
+  "DIFERENCIA_BULTOS", "DIFERENCIA_UNIDADES", "TIPO_DIFERENCIA", "ESTADO", "OBSERVACION",
+  "ESTADO_GESTION"
 ];
 
 function doGet(e) {
@@ -82,7 +83,8 @@ function guardar_(r) {
     Number(r.diferenciaUnidades || 0),
     limpiar_(r.tipoDiferencia),
     normalizar_(r.estado || "PENDIENTE"),
-    limpiar_(r.observacion)
+    limpiar_(r.observacion),
+    normalizar_(r.estadoGestion || "PENDIENTE")
   ]];
   if (fila) sh.getRange(fila, 1, 1, HEADERS.length).setValues(valores);
   else sh.appendRow(valores[0]);
@@ -130,7 +132,8 @@ function leerValidaciones_() {
       diferenciaUnidades: Number(row[15] || 0),
       tipoDiferencia: limpiar_(row[16]),
       estado: normalizar_(row[17]),
-      observacion: limpiar_(row[18])
+      observacion: limpiar_(row[18]),
+      estadoGestion: normalizar_(row[19] || "PENDIENTE")
     };
   });
   return out;

@@ -1,6 +1,6 @@
 const CONFIG = {
   SHEET_ID: "1-v6vXjHpLlIn0-_lVZw0BtGopnxSHH0zqoOrW8aBwcg",
-  DEFAULT_API_URL: "https://script.google.com/macros/s/AKfycbyi0PY9LMVnQhGKuILNTBka7LSWA-N8CJF7IuDyNOBJPKVRi0L6PGtf-Z8TrfIV7rJR/exec",
+  DEFAULT_API_URL: "https://script.google.com/macros/s/AKfycbyDIkA9grHHVGMEY5-R_qYpiYxY4XId_7ckrfEMs_adwFR7vHhPd2QtB6gjopZgK3BA0Q/exec",
   API_STORAGE_KEY: "anc_inv_activo_api_url",
   VALIDACIONES_KEY: "anc_inv_activo_validaciones_v1",
   PENDING_SYNC_KEY: "anc_inv_activo_sync_pendiente_v1",
@@ -27,6 +27,7 @@ let modalCantidad = null;
 let avisoGuardado = "";
 let syncTimer = null;
 let filtroTimer = null;
+const ESTADO_GESTION_DEFAULT = "PENDIENTE";
 
 const USUARIOS = {
   celular: { pass: "1234", nombre: "Validador", vista: "mobile" },
@@ -343,6 +344,29 @@ function leerValidacionesLocales() {
   }
 }
 
+function fechaMs(valor) {
+  const fecha = Date.parse(valor || "");
+  return Number.isFinite(fecha) ? fecha : 0;
+}
+
+function combinarValidaciones(remotas = {}) {
+  const remote = aplicarCorteReset(remotas || {});
+  const local = aplicarCorteReset(validaciones || {});
+  const pendientes = new Set(leerPendientesSync());
+  const merged = { ...remote };
+  Object.entries(local).forEach(([id, registroLocal]) => {
+    const registroRemoto = remote[id];
+    if (
+      pendientes.has(id) ||
+      !registroRemoto ||
+      fechaMs(registroLocal?.actualizado) >= fechaMs(registroRemoto?.actualizado)
+    ) {
+      merged[id] = registroLocal;
+    }
+  });
+  return merged;
+}
+
 async function apiGet(params = {}) {
   const urlBase = apiUrl();
   if (!urlBase) return null;
@@ -375,7 +399,7 @@ async function cargarValidaciones() {
     await sincronizarValidacionesLocales();
     const data = await apiGet({ action: "validaciones" });
     if (data?.validaciones) {
-      validaciones = aplicarCorteReset(data.validaciones);
+      validaciones = combinarValidaciones(data.validaciones);
       guardarValidaciones();
     }
   } catch {}
@@ -468,6 +492,7 @@ function validacionConInventario(item) {
     diferenciaBultos: num(v.diferenciaBultos),
     diferenciaUnidades: num(v.diferenciaUnidades),
     tipoDiferencia: limpiar(v.tipoDiferencia),
+    estadoGestion: normalizar(v.estadoGestion || ESTADO_GESTION_DEFAULT),
     actualizado: v.actualizado || ""
   };
 }
@@ -539,15 +564,94 @@ async function marcar(id, estado, observacion = null, extras = {}) {
     asignadas: item.asignadas,
     transitoUnd: item.transitoUnd,
     transitoBultos: item.transitoBultos,
-    diferenciaBultos: num(extras.diferenciaBultos ?? actual.diferenciaBultos),
-    diferenciaUnidades: num(extras.diferenciaUnidades ?? actual.diferenciaUnidades),
-    tipoDiferencia: limpiar(extras.tipoDiferencia || actual.tipoDiferencia),
+    diferenciaBultos: estado === "OK" ? 0 : num(extras.diferenciaBultos ?? actual.diferenciaBultos),
+    diferenciaUnidades: estado === "OK" ? 0 : num(extras.diferenciaUnidades ?? actual.diferenciaUnidades),
+    tipoDiferencia: estado === "OK" ? "" : limpiar(extras.tipoDiferencia || actual.tipoDiferencia),
+    estadoGestion: normalizar(actual.estadoGestion || ESTADO_GESTION_DEFAULT),
     actualizado: new Date().toISOString()
   };
   validaciones[id] = registro;
   guardarValidaciones();
   agregarPendienteSync(id);
   if (observacion === null) render();
+  try {
+    await apiPost({ action: "guardar", registro });
+    quitarPendientesSync([id]);
+  } catch {
+    programarSync(1800);
+  }
+}
+
+function registroValidacion(item, estado, observacion = "", extras = {}) {
+  const actual = validaciones[item.id] || {};
+  return {
+    ...actual,
+    id: item.id,
+    estado,
+    observacion,
+    ubicacion: item.ubicacion,
+    pasillo: item.pasillo,
+    bahia: item.bahia,
+    codigo: item.codigo,
+    codAlt: item.codAlt,
+    estilo: item.estilo,
+    descripcion: item.descripcion,
+    productosTotal: item.productosTotal || 1,
+    productosDetalle: item.productosDetalle || [],
+    bultos: item.bultos,
+    unidades: item.unidades,
+    asignadas: item.asignadas,
+    transitoUnd: item.transitoUnd,
+    transitoBultos: item.transitoBultos,
+    diferenciaBultos: num(extras.diferenciaBultos ?? 0),
+    diferenciaUnidades: num(extras.diferenciaUnidades ?? 0),
+    tipoDiferencia: limpiar(extras.tipoDiferencia || ""),
+    estadoGestion: normalizar(actual.estadoGestion || ESTADO_GESTION_DEFAULT),
+    actualizado: new Date().toISOString()
+  };
+}
+
+async function marcarTodoOkVisible() {
+  const items = itemsFiltrados();
+  if (!items.length) {
+    mostrarAviso("No hay ubicaciones visibles para marcar.");
+    return;
+  }
+  const ok = window.confirm(`Se marcaran ${items.length} ubicaciones visibles como OK. Luego podras cambiar las que tengan faltante o sobrante. Deseas continuar?`);
+  if (!ok) return;
+  const ids = [];
+  items.forEach(item => {
+    validaciones[item.id] = registroValidacion(item, "OK", validaciones[item.id]?.observacion || "");
+    ids.push(item.id);
+  });
+  guardarValidaciones();
+  guardarPendientesSync([...leerPendientesSync(), ...ids]);
+  mostrarAviso(`${items.length} ubicaciones marcadas como OK.`);
+  render();
+  try {
+    const resultados = await Promise.allSettled(ids.map(id => apiPost({ action: "guardar", registro: validaciones[id] })));
+    quitarPendientesSync(ids.filter((_, index) => resultados[index].status === "fulfilled"));
+  } catch {
+    programarSync(1800);
+  }
+}
+
+async function cambiarEstadoGestion(id, estadoGestion = "") {
+  const item = ubicaciones.find(u => u.id === id);
+  if (!item) return;
+  const actual = validaciones[id] || {};
+  const nuevoEstado = normalizar(estadoGestion || actual.estadoGestion) === "REGULARIZADO" ? "PENDIENTE" : "REGULARIZADO";
+  const registro = {
+    ...validacionConInventario(item),
+    ...actual,
+    estadoGestion: nuevoEstado,
+    actualizado: new Date().toISOString()
+  };
+  validaciones[id] = registro;
+  guardarValidaciones();
+  agregarPendienteSync(id);
+  mostrarAviso(`Incidencia ${nuevoEstado.toLowerCase()}.`);
+  render();
   try {
     await apiPost({ action: "guardar", registro });
     quitarPendientesSync([id]);
@@ -615,6 +719,7 @@ function cambiarObs(id, valor) {
     diferenciaBultos: actual.diferenciaBultos || 0,
     diferenciaUnidades: actual.diferenciaUnidades || 0,
     tipoDiferencia: actual.tipoDiferencia || "",
+    estadoGestion: normalizar(actual.estadoGestion || ESTADO_GESTION_DEFAULT),
     actualizado: new Date().toISOString()
   };
   localStorage.setItem(CONFIG.VALIDACIONES_KEY, JSON.stringify(validaciones));
@@ -651,6 +756,7 @@ function filasExportables(pasillo = "") {
         diferenciaUnidades: row.diferenciaUnidades || 0,
         bultosValidados: stockFinalBultos(row),
         unidadesValidadas: stockFinalUnidades(row),
+        estadoGestion: row.estadoGestion || ESTADO_GESTION_DEFAULT,
         observacion: row.observacion,
         actualizado: row.actualizado || ""
       };
@@ -662,7 +768,7 @@ function descargarExcelInventario(pasillo = "") {
   const headers = [
     "PASILLO", "BAHIA", "UBICACION", "CODIGO", "COD_ALT", "ESTILO", "DESCRIPCION", "PRODUCTOS_UBICACION", "DETALLE_PRODUCTOS",
     "BULTOS_SISTEMA", "UNIDADES_SISTEMA", "ASIGNADAS", "TRANSITO_BULTOS", "ESTADO",
-    "DIF_BULTOS", "DIF_UNIDADES", "BULTOS_VALIDADOS", "UNIDADES_VALIDADAS", "OBSERVACION", "ACTUALIZADO"
+    "DIF_BULTOS", "DIF_UNIDADES", "BULTOS_VALIDADOS", "UNIDADES_VALIDADAS", "ESTADO_GESTION", "OBSERVACION", "ACTUALIZADO"
   ];
   const rows = data.map(r => `
     <tr>
@@ -675,7 +781,7 @@ function descargarExcelInventario(pasillo = "") {
       <td>${Number(r.transitoBultos || 0)}</td><td>${excelTexto(r.estado)}</td>
       <td>${Number(r.diferenciaBultos || 0)}</td><td>${Number(r.diferenciaUnidades || 0)}</td>
       <td>${Number(r.bultosValidados || 0)}</td><td>${Number(r.unidadesValidadas || 0)}</td>
-      <td>${excelTexto(r.observacion)}</td><td>${excelTexto(r.actualizado)}</td>
+      <td>${excelTexto(r.estadoGestion)}</td><td>${excelTexto(r.observacion)}</td><td>${excelTexto(r.actualizado)}</td>
     </tr>
   `).join("");
   const htmlExcel = `<html><head><meta charset="UTF-8"></head><body><table border="1"><thead><tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></body></html>`;
@@ -706,6 +812,45 @@ function actualizarFiltro(valor) {
 
 function pasillosDisponibles() {
   return Array.from(new Set(ubicaciones.map(u => u.pasillo))).sort((a, b) => num(a) - num(b));
+}
+
+function metricasDashboard() {
+  const vals = ubicaciones.map(validacionConInventario);
+  const total = vals.length || 1;
+  const ok = vals.filter(v => v.estado === "OK").length;
+  const falta = vals.filter(v => v.estado === "FALTA").length;
+  const sobra = vals.filter(v => v.estado === "SOBRA").length;
+  const pendiente = vals.filter(v => v.estado === "PENDIENTE").length;
+  const incidencias = vals.filter(v => v.estado === "FALTA" || v.estado === "SOBRA");
+  const regularizado = incidencias.filter(v => v.estadoGestion === "REGULARIZADO").length;
+  const gestionPendiente = Math.max(0, incidencias.length - regularizado);
+  const avance = (ok + falta + sobra) / total * 100;
+  const regularizacion = incidencias.length ? regularizado / incidencias.length * 100 : 100;
+  const pasillos = pasillosDisponibles().map(pasillo => {
+    const items = vals.filter(v => v.pasillo === pasillo);
+    const totalPasillo = items.length || 1;
+    const validados = items.filter(v => v.estado !== "PENDIENTE").length;
+    const inc = items.filter(v => v.estado === "FALTA" || v.estado === "SOBRA").length;
+    return {
+      pasillo,
+      total: items.length,
+      validados,
+      incidencias: inc,
+      avance: validados / totalPasillo * 100
+    };
+  });
+  return { vals, total: vals.length, ok, falta, sobra, pendiente, incidencias, regularizado, gestionPendiente, avance, regularizacion, pasillos };
+}
+
+function donutCss(partes) {
+  let inicio = 0;
+  const segmentos = partes.filter(p => p.valor > 0).map(p => {
+    const fin = inicio + p.valor;
+    const segmento = `${p.color} ${inicio}% ${fin}%`;
+    inicio = fin;
+    return segmento;
+  });
+  return `conic-gradient(${segmentos.join(", ") || "#e3e8f0 0 100%"})`;
 }
 
 function renderCarga(texto) {
@@ -743,11 +888,16 @@ function renderLogin() {
 
 function header(titulo, subtitulo, desktop = false) {
   const r = resumen();
+  const vistaActual = sesion?.vista || new URL(location.href).searchParams.get("view") || "mobile";
   return `
     <header class="top">
       <div class="top-row">
         <div class="brand"><h1>${titulo}</h1><span>${subtitulo}</span></div>
         <div class="nav-actions">
+          ${desktop ? `
+            <button class="icon-button ${vistaActual === "dashboard" ? "active" : ""}" onclick="abrirVista('dashboard')">DASHBOARD</button>
+            <button class="icon-button ${vistaActual === "monitor" ? "active" : ""}" onclick="abrirVista('monitor')">MONITOR</button>
+          ` : ""}
           <button class="icon-button danger" onclick="reiniciarAvance()">REINICIAR</button>
           <button class="icon-button" onclick="cerrarSesion()">SALIR</button>
           <button class="icon-button" onclick="cargarDatos(true)">SYNC</button>
@@ -779,6 +929,7 @@ function renderMobile() {
       ${avisoGuardado ? `<div class="save-toast">${html(avisoGuardado)}</div>` : ""}
       <div class="toolbar">
         <input value="${html(filtroTexto)}" placeholder="Buscar ubicacion, codigo o estilo" oninput="actualizarFiltro(this.value)">
+        <button class="primary success" onclick="marcarTodoOkVisible()">Todo visible OK</button>
         <button class="primary" onclick="cargarDatos(true)">Actualizar</button>
       </div>
       <div class="aisle-tabs">
@@ -851,6 +1002,97 @@ function modalCantidadHtml() {
   `;
 }
 
+function renderDashboard() {
+  app.className = "app-shell desktop";
+  const m = metricasDashboard();
+  const totalGrafico = m.total || 1;
+  const incidenciaTotal = m.incidencias.length || 1;
+  const donutAvance = donutCss([
+    { color: "#4c7658", valor: m.ok / totalGrafico * 100 },
+    { color: "#9f4742", valor: m.falta / totalGrafico * 100 },
+    { color: "#d09337", valor: m.sobra / totalGrafico * 100 },
+    { color: "#dfe6ef", valor: m.pendiente / totalGrafico * 100 }
+  ]);
+  const donutGestion = donutCss([
+    { color: "#4c7658", valor: m.regularizado / incidenciaTotal * 100 },
+    { color: "#d09337", valor: m.gestionPendiente / incidenciaTotal * 100 }
+  ]);
+  const topPasillos = [...m.pasillos].sort((a, b) => b.incidencias - a.incidencias || b.avance - a.avance).slice(0, 8);
+  app.innerHTML = `
+    ${header("Dashboard Inventario", "Vista ejecutiva de validacion y regularizacion", true)}
+    <main class="content dashboard-content">
+      ${avisoGuardado ? `<div class="save-toast">${html(avisoGuardado)}</div>` : ""}
+      <section class="dashboard-kpis">
+        <article class="dash-kpi total"><span>Total ubicaciones</span><strong>${fmt(m.total)}</strong><i style="width:100%"></i></article>
+        <article class="dash-kpi ok"><span>Correctas</span><strong>${fmt(m.ok)}</strong><i style="width:${Math.min(100, m.total ? m.ok / m.total * 100 : 0)}%"></i></article>
+        <article class="dash-kpi falta"><span>Faltantes</span><strong>${fmt(m.falta)}</strong><i style="width:${Math.min(100, m.total ? m.falta / m.total * 100 : 0)}%"></i></article>
+        <article class="dash-kpi sobra"><span>Sobrantes</span><strong>${fmt(m.sobra)}</strong><i style="width:${Math.min(100, m.total ? m.sobra / m.total * 100 : 0)}%"></i></article>
+        <article class="dash-kpi pendiente"><span>Pendientes</span><strong>${fmt(m.pendiente)}</strong><i style="width:${Math.min(100, m.total ? m.pendiente / m.total * 100 : 0)}%"></i></article>
+      </section>
+      <section class="power-grid">
+        <article class="power-card hero-chart">
+          <div>
+            <span>Avance validacion</span>
+            <strong>${fmt(m.avance)}%</strong>
+            <small>${fmt(m.ok + m.falta + m.sobra)} de ${fmt(m.total)} ubicaciones</small>
+          </div>
+          <div class="donut-xl" style="background:${donutAvance}"><b>${fmt(m.avance)}%</b></div>
+          <div class="legend-row">
+            <span><i class="ok"></i>OK</span><span><i class="falta"></i>Falta</span><span><i class="sobra"></i>Sobra</span><span><i class="pendiente"></i>Pend.</span>
+          </div>
+        </article>
+        <article class="power-card hero-chart gestion">
+          <div>
+            <span>Regularizacion</span>
+            <strong>${fmt(m.regularizacion)}%</strong>
+            <small>${fmt(m.regularizado)} regularizadas de ${fmt(m.incidencias.length)} incidencias</small>
+          </div>
+          <div class="donut-xl" style="background:${donutGestion}"><b>${fmt(m.regularizacion)}%</b></div>
+          <div class="legend-row">
+            <span><i class="ok"></i>Regularizado</span><span><i class="sobra"></i>Pendiente</span>
+          </div>
+        </article>
+      </section>
+      <section class="power-card aisle-power">
+        <div class="panel-head">
+          <h2>Capacidad validada por pasillo</h2>
+          <button class="export-btn" onclick="abrirVista('monitor')">Ver detalle</button>
+        </div>
+        <div class="aisle-power-grid">
+          ${m.pasillos.map(p => `
+            <article class="aisle-power-card">
+              <strong>P${Number(p.pasillo)}</strong>
+              <div class="bar tall"><i style="height:${Math.min(100, p.avance)}%"></i></div>
+              <span>${fmt(p.avance)}%</span>
+              <small>${fmt(p.validados)}/${fmt(p.total)}</small>
+            </article>
+          `).join("")}
+        </div>
+      </section>
+      <section class="power-grid bottom">
+        <article class="power-card">
+          <div class="panel-head"><h2>Pasillos con mayor alerta</h2></div>
+          <div class="risk-list">
+            ${topPasillos.map(p => `
+              <div class="risk-row">
+                <span>Pasillo ${Number(p.pasillo)}</span>
+                <div class="bar"><i style="width:${Math.min(100, m.incidencias.length ? p.incidencias / Math.max(...m.pasillos.map(x => x.incidencias), 1) * 100 : 0)}%"></i></div>
+                <strong>${fmt(p.incidencias)}</strong>
+              </div>
+            `).join("") || `<div class="empty">Sin incidencias.</div>`}
+          </div>
+        </article>
+        <article class="power-card status-mosaic">
+          <div class="mosaic ok"><span>OK</span><strong>${fmt(m.ok)}</strong></div>
+          <div class="mosaic falta"><span>Falta</span><strong>${fmt(m.falta)}</strong></div>
+          <div class="mosaic sobra"><span>Sobra</span><strong>${fmt(m.sobra)}</strong></div>
+          <div class="mosaic pendiente"><span>Pendiente</span><strong>${fmt(m.pendiente)}</strong></div>
+        </article>
+      </section>
+    </main>
+  `;
+}
+
 function renderMonitor() {
   app.className = "app-shell desktop";
   const r = resumen();
@@ -901,9 +1143,9 @@ function renderMonitor() {
             <button class="export-btn" onclick="descargarExcelInventario(monitorPasilloActivo)">Excel ${monitorPasilloActivo ? `P${Number(monitorPasilloActivo)}` : "general"}</button>
           </div>
           <table class="issue-table">
-            <thead><tr><th>Ubicacion</th><th>Producto</th><th>Estado</th><th>Validacion</th><th>Obs.</th></tr></thead>
+            <thead><tr><th>Ubicacion</th><th>Producto</th><th>Estado</th><th>Validacion</th><th>Gestion</th><th>Obs.</th></tr></thead>
             <tbody>
-              ${incidencias.map(v => `<tr class="${claseEstado(v.estado)}"><td><strong>${html(v.ubicacion)}</strong></td><td><div class="product-cell"><strong>${etiquetaProductoUbicacion(v)}</strong><span>${html(v.descripcion || "")}</span><small>Transito: ${fmt(v.transitoBultos || 0)} bul</small></div></td><td><span class="state-chip ${claseEstado(v.estado)}">${html(v.estado)}</span></td><td>${validacionIncidenciaHtml(v)}</td><td class="obs-cell">${html(v.observacion || "-")}</td></tr>`).join("") || `<tr><td colspan="5">Sin faltantes ni sobrantes.</td></tr>`}
+              ${incidencias.map(v => `<tr class="${claseEstado(v.estado)}"><td><strong>${html(v.ubicacion)}</strong></td><td><div class="product-cell"><strong>${etiquetaProductoUbicacion(v)}</strong><span>${html(v.descripcion || "")}</span><small>Transito: ${fmt(v.transitoBultos || 0)} bul</small></div></td><td><span class="state-chip ${claseEstado(v.estado)}">${html(v.estado)}</span></td><td>${validacionIncidenciaHtml(v)}</td><td><button class="gestion-btn ${v.estadoGestion === "REGULARIZADO" ? "regularizado" : "pendiente"}" onclick="cambiarEstadoGestion('${html(v.id)}','${html(v.estadoGestion)}')">${v.estadoGestion === "REGULARIZADO" ? "Regularizado" : "Pendiente"}</button></td><td class="obs-cell">${html(v.observacion || "-")}</td></tr>`).join("") || `<tr><td colspan="6">Sin faltantes ni sobrantes.</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -926,7 +1168,8 @@ function abrirVista(vista) {
 function render() {
   if (!sesion) return renderLogin();
   const vista = sesion.vista || new URL(location.href).searchParams.get("view") || "mobile";
-  if (vista === "monitor") renderMonitor();
+  if (vista === "dashboard") renderDashboard();
+  else if (vista === "monitor") renderMonitor();
   else renderMobile();
 }
 
@@ -939,7 +1182,8 @@ canal?.addEventListener("message", event => {
 });
 
 setInterval(async () => {
-  if ((new URL(location.href).searchParams.get("view") || "mobile") !== "monitor") return;
+  const vistaActual = new URL(location.href).searchParams.get("view") || "mobile";
+  if (vistaActual !== "monitor" && vistaActual !== "dashboard") return;
   await cargarValidaciones();
   render();
 }, CONFIG.POLL_MS);
