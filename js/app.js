@@ -27,6 +27,8 @@ let modalCantidad = null;
 let avisoGuardado = "";
 let syncTimer = null;
 let filtroTimer = null;
+let mantenerFocoBusqueda = false;
+let dashboardModoReporte = false;
 const ESTADO_GESTION_DEFAULT = "PENDIENTE";
 
 const USUARIOS = {
@@ -806,8 +808,26 @@ function itemsFiltrados() {
 
 function actualizarFiltro(valor) {
   filtroTexto = valor;
+  mantenerFocoBusqueda = true;
   clearTimeout(filtroTimer);
   filtroTimer = setTimeout(renderMobile, 180);
+}
+
+function restaurarFocoBusqueda() {
+  if (!mantenerFocoBusqueda) return;
+  mantenerFocoBusqueda = false;
+  requestAnimationFrame(() => {
+    const input = document.getElementById("buscadorValidacion");
+    if (!input) return;
+    input.focus();
+    const fin = input.value.length;
+    try { input.setSelectionRange(fin, fin); } catch {}
+  });
+}
+
+function alternarVistaReporteDashboard() {
+  dashboardModoReporte = !dashboardModoReporte;
+  renderDashboard();
 }
 
 function pasillosDisponibles() {
@@ -830,11 +850,19 @@ function metricasDashboard() {
     const items = vals.filter(v => v.pasillo === pasillo);
     const totalPasillo = items.length || 1;
     const validados = items.filter(v => v.estado !== "PENDIENTE").length;
+    const okPasillo = items.filter(v => v.estado === "OK").length;
+    const faltaPasillo = items.filter(v => v.estado === "FALTA").length;
+    const sobraPasillo = items.filter(v => v.estado === "SOBRA").length;
+    const pendientePasillo = items.filter(v => v.estado === "PENDIENTE").length;
     const inc = items.filter(v => v.estado === "FALTA" || v.estado === "SOBRA").length;
     return {
       pasillo,
       total: items.length,
       validados,
+      ok: okPasillo,
+      falta: faltaPasillo,
+      sobra: sobraPasillo,
+      pendiente: pendientePasillo,
       incidencias: inc,
       avance: validados / totalPasillo * 100
     };
@@ -886,6 +914,25 @@ function renderLogin() {
   requestAnimationFrame(() => document.getElementById("loginPass")?.focus());
 }
 
+function icono(tipo) {
+  const paths = {
+    dashboard: `<path d="M4 13h6V4H4v9z"></path><path d="M14 20h6V4h-6v16z"></path><path d="M4 20h6v-3H4v3z"></path>`,
+    monitor: `<path d="M4 5h16v11H4z"></path><path d="M8 21h8"></path><path d="M12 16v5"></path>`,
+    refresh: `<path d="M20 6v5h-5"></path><path d="M4 18v-5h5"></path><path d="M18 9a6 6 0 0 0-10-3L4 10"></path><path d="M6 15a6 6 0 0 0 10 3l4-4"></path>`,
+    logout: `<path d="M10 17l5-5-5-5"></path><path d="M15 12H3"></path><path d="M21 4v16"></path>`,
+    reset: `<path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M6 6l1 15h10l1-15"></path>`,
+    total: `<path d="M4 7h16"></path><path d="M4 12h16"></path><path d="M4 17h10"></path>`,
+    ok: `<path d="M5 13l4 4L19 7"></path>`,
+    falta: `<path d="M12 4v10"></path><path d="M12 19h.01"></path>`,
+    sobra: `<path d="M12 5v14"></path><path d="M5 12h14"></path>`,
+    pendiente: `<circle cx="12" cy="12" r="8"></circle><path d="M12 8v5l3 2"></path>`,
+    avance: `<path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l3-4 3 2 5-7"></path>`,
+    pasillo: `<path d="M5 4h14v16H5z"></path><path d="M9 4v16"></path><path d="M15 4v16"></path>`,
+    alerta: `<path d="M12 3l10 18H2L12 3z"></path><path d="M12 9v5"></path><path d="M12 17h.01"></path>`
+  };
+  return `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true">${paths[tipo] || paths.total}</svg>`;
+}
+
 function header(titulo, subtitulo, desktop = false) {
   const r = resumen();
   const vistaActual = sesion?.vista || new URL(location.href).searchParams.get("view") || "mobile";
@@ -895,18 +942,19 @@ function header(titulo, subtitulo, desktop = false) {
         <div class="brand"><h1>${titulo}</h1><span>${subtitulo}</span></div>
         <div class="nav-actions">
           ${desktop ? `
-            <button class="icon-button ${vistaActual === "dashboard" ? "active" : ""}" onclick="abrirVista('dashboard')">DASHBOARD</button>
-            <button class="icon-button ${vistaActual === "monitor" ? "active" : ""}" onclick="abrirVista('monitor')">MONITOR</button>
+            <button class="icon-button ${vistaActual === "dashboard" ? "active" : ""}" onclick="abrirVista('dashboard')">${icono("dashboard")}<span>DASHBOARD</span></button>
+            <button class="icon-button ${vistaActual === "monitor" ? "active" : ""}" onclick="abrirVista('monitor')">${icono("monitor")}<span>MONITOR</span></button>
+            ${vistaActual === "dashboard" ? `<button class="icon-button" onclick="alternarVistaReporteDashboard()">${icono("avance")}<span>${dashboardModoReporte ? "VISTA NORMAL" : "VISTA REPORTE"}</span></button>` : ""}
           ` : ""}
-          <button class="icon-button danger" onclick="reiniciarAvance()">REINICIAR</button>
-          <button class="icon-button" onclick="cerrarSesion()">SALIR</button>
-          <button class="icon-button" onclick="cargarDatos(true)">SYNC</button>
+          <button class="icon-button danger" onclick="reiniciarAvance()">${icono("reset")}<span>REINICIAR</span></button>
+          <button class="icon-button" onclick="cerrarSesion()">${icono("logout")}<span>SALIR</span></button>
+          <button class="icon-button" onclick="cargarDatos(true)">${icono("refresh")}<span>SYNC</span></button>
         </div>
       </div>
       <div class="status-strip">
-        <div class="mini-kpi"><span>Total</span><strong>${fmt(r.total)}</strong></div>
-        <div class="mini-kpi"><span>OK</span><strong>${fmt(r.ok)}</strong></div>
-        <div class="mini-kpi"><span>Pend.</span><strong>${fmt(r.pendiente)}</strong></div>
+        <div class="mini-kpi">${icono("total")}<span>Total</span><strong>${fmt(r.total)}</strong></div>
+        <div class="mini-kpi">${icono("ok")}<span>OK</span><strong>${fmt(r.ok)}</strong></div>
+        <div class="mini-kpi">${icono("pendiente")}<span>Pend.</span><strong>${fmt(r.pendiente)}</strong></div>
       </div>
     </header>
   `;
@@ -928,9 +976,9 @@ function renderMobile() {
     <main class="content">
       ${avisoGuardado ? `<div class="save-toast">${html(avisoGuardado)}</div>` : ""}
       <div class="toolbar">
-        <input value="${html(filtroTexto)}" placeholder="Buscar ubicacion, codigo o estilo" oninput="actualizarFiltro(this.value)">
-        <button class="primary success" onclick="marcarTodoOkVisible()">Todo visible OK</button>
-        <button class="primary" onclick="cargarDatos(true)">Actualizar</button>
+        <input id="buscadorValidacion" value="${html(filtroTexto)}" placeholder="Buscar ubicacion, codigo o estilo" autocomplete="off" oninput="actualizarFiltro(this.value)">
+        <button class="primary success" onclick="marcarTodoOkVisible()">${icono("ok")}<span>Todo visible OK</span></button>
+        <button class="primary" onclick="cargarDatos(true)">${icono("refresh")}<span>Actualizar</span></button>
       </div>
       <div class="aisle-tabs">
         ${pasillos.map(p => `<button class="${p === pasilloActivo ? "active" : ""}" onclick="pasilloActivo='${p}';renderMobile()">${Number(p)}</button>`).join("")}
@@ -942,6 +990,7 @@ function renderMobile() {
     </main>
     ${modalCantidadHtml()}
   `;
+  restaurarFocoBusqueda();
 }
 
 function cardMobile(item) {
@@ -1003,10 +1052,26 @@ function modalCantidadHtml() {
 }
 
 function renderDashboard() {
-  app.className = "app-shell desktop";
+  app.className = `app-shell desktop ${dashboardModoReporte ? "report-view" : ""}`;
   const m = metricasDashboard();
   const totalGrafico = m.total || 1;
   const incidenciaTotal = m.incidencias.length || 1;
+  const pasillosOrdenados = [...m.pasillos].sort((a, b) => num(a.pasillo) - num(b.pasillo));
+  const topPasillos = [...m.pasillos].sort((a, b) => b.incidencias - a.incidencias || b.avance - a.avance).slice(0, 6);
+  const focoAlerta = topPasillos[0] || null;
+  const focoPendiente = [...m.pasillos].sort((a, b) => b.pendiente - a.pendiente || a.avance - b.avance)[0] || null;
+  const mejorPasillo = [...m.pasillos].sort((a, b) => b.avance - a.avance || b.validados - a.validados)[0] || null;
+  const tendencia = pasillosOrdenados.map((p, index) => {
+    const x = pasillosOrdenados.length === 1 ? 500 : 42 + (index / Math.max(pasillosOrdenados.length - 1, 1)) * 916;
+    const y = 166 - (Math.min(100, p.avance) / 100) * 126;
+    return { ...p, x, y };
+  });
+  const tendenciaPath = tendencia.reduce((path, p, index) => {
+    if (!index) return `M ${p.x} ${p.y}`;
+    const prev = tendencia[index - 1];
+    const mid = (prev.x + p.x) / 2;
+    return `${path} C ${mid} ${prev.y}, ${mid} ${p.y}, ${p.x} ${p.y}`;
+  }, "");
   const donutAvance = donutCss([
     { color: "#4c7658", valor: m.ok / totalGrafico * 100 },
     { color: "#9f4742", valor: m.falta / totalGrafico * 100 },
@@ -1017,76 +1082,95 @@ function renderDashboard() {
     { color: "#4c7658", valor: m.regularizado / incidenciaTotal * 100 },
     { color: "#d09337", valor: m.gestionPendiente / incidenciaTotal * 100 }
   ]);
-  const topPasillos = [...m.pasillos].sort((a, b) => b.incidencias - a.incidencias || b.avance - a.avance).slice(0, 8);
   app.innerHTML = `
     ${header("Dashboard Inventario", "Vista ejecutiva de validacion y regularizacion", true)}
-    <main class="content dashboard-content">
+    <main class="content dashboard-content dashboard-redesign ${dashboardModoReporte ? "report-sheet" : ""}">
       ${avisoGuardado ? `<div class="save-toast">${html(avisoGuardado)}</div>` : ""}
-      <section class="dashboard-kpis">
-        <article class="dash-kpi total"><span>Total ubicaciones</span><strong>${fmt(m.total)}</strong><i style="width:100%"></i></article>
-        <article class="dash-kpi ok"><span>Correctas</span><strong>${fmt(m.ok)}</strong><i style="width:${Math.min(100, m.total ? m.ok / m.total * 100 : 0)}%"></i></article>
-        <article class="dash-kpi falta"><span>Faltantes</span><strong>${fmt(m.falta)}</strong><i style="width:${Math.min(100, m.total ? m.falta / m.total * 100 : 0)}%"></i></article>
-        <article class="dash-kpi sobra"><span>Sobrantes</span><strong>${fmt(m.sobra)}</strong><i style="width:${Math.min(100, m.total ? m.sobra / m.total * 100 : 0)}%"></i></article>
-        <article class="dash-kpi pendiente"><span>Pendientes</span><strong>${fmt(m.pendiente)}</strong><i style="width:${Math.min(100, m.total ? m.pendiente / m.total * 100 : 0)}%"></i></article>
-      </section>
-      <section class="power-grid">
-        <article class="power-card hero-chart">
+      <section class="visual-hero-grid">
+        <article class="visual-score-card">
           <div>
-            <span>Avance validacion</span>
+            <span>${icono("avance")}Avance general</span>
             <strong>${fmt(m.avance)}%</strong>
-            <small>${fmt(m.ok + m.falta + m.sobra)} de ${fmt(m.total)} ubicaciones</small>
+            <small>${fmt(m.ok + m.falta + m.sobra)} / ${fmt(m.total)} ubicaciones</small>
           </div>
           <div class="donut-xl" style="background:${donutAvance}"><b>${fmt(m.avance)}%</b></div>
-          <div class="legend-row">
-            <span><i class="ok"></i>OK</span><span><i class="falta"></i>Falta</span><span><i class="sobra"></i>Sobra</span><span><i class="pendiente"></i>Pend.</span>
-          </div>
         </article>
-        <article class="power-card hero-chart gestion">
-          <div>
-            <span>Regularizacion</span>
+        <article class="visual-kpi-stack">
+          <div class="visual-kpi ok">${icono("ok")}<span>OK</span><strong>${fmt(m.ok)}</strong></div>
+          <div class="visual-kpi falta">${icono("falta")}<span>Falta</span><strong>${fmt(m.falta)}</strong></div>
+          <div class="visual-kpi sobra">${icono("sobra")}<span>Sobra</span><strong>${fmt(m.sobra)}</strong></div>
+          <div class="visual-kpi pendiente">${icono("pendiente")}<span>Pend.</span><strong>${fmt(m.pendiente)}</strong></div>
+        </article>
+        <article class="visual-donut-card">
+          <header>
+            <h2>${icono("ok")}Regularizacion</h2>
             <strong>${fmt(m.regularizacion)}%</strong>
-            <small>${fmt(m.regularizado)} regularizadas de ${fmt(m.incidencias.length)} incidencias</small>
-          </div>
-          <div class="donut-xl" style="background:${donutGestion}"><b>${fmt(m.regularizacion)}%</b></div>
-          <div class="legend-row">
+          </header>
+          <div class="donut-md" style="background:${donutGestion}"><b>${fmt(m.regularizado)}/${fmt(m.incidencias.length)}</b></div>
+          <div class="legend-row compact">
             <span><i class="ok"></i>Regularizado</span><span><i class="sobra"></i>Pendiente</span>
           </div>
         </article>
       </section>
-      <section class="power-card aisle-power">
-        <div class="panel-head">
-          <h2>Capacidad validada por pasillo</h2>
-          <button class="export-btn" onclick="abrirVista('monitor')">Ver detalle</button>
-        </div>
-        <div class="aisle-power-grid">
-          ${m.pasillos.map(p => `
-            <article class="aisle-power-card">
-              <strong>P${Number(p.pasillo)}</strong>
-              <div class="bar tall"><i style="height:${Math.min(100, p.avance)}%"></i></div>
-              <span>${fmt(p.avance)}%</span>
-              <small>${fmt(p.validados)}/${fmt(p.total)}</small>
-            </article>
-          `).join("")}
-        </div>
+      <section class="visual-chart-grid">
+        <article class="power-card visual-map-card">
+          <div class="panel-head">
+            <h2>${icono("pasillo")}Mapa de pasillos</h2>
+            <button class="export-btn" onclick="abrirVista('monitor')">Ver detalle</button>
+          </div>
+          <div class="pasillo-tile-grid">
+            ${pasillosOrdenados.map(p => `
+              <article class="pasillo-tile ${p.incidencias ? "alert" : p.pendiente ? "pending" : "done"}">
+                <span>P${Number(p.pasillo)}</span>
+                <strong>${fmt(p.avance)}%</strong>
+                <small>${fmt(p.validados)}/${fmt(p.total)}</small>
+                <i style="height:${Math.max(3, Math.min(100, p.avance))}%"></i>
+              </article>
+            `).join("")}
+          </div>
+        </article>
+        <article class="power-card visual-trend-card">
+          <div class="panel-head"><h2>${icono("avance")}Tendencia por pasillo</h2></div>
+          <svg class="trend-svg" viewBox="0 0 1000 190" preserveAspectRatio="none">
+            <line x1="32" y1="166" x2="968" y2="166"></line>
+            <line x1="32" y1="103" x2="968" y2="103"></line>
+            <line x1="32" y1="40" x2="968" y2="40"></line>
+            <path d="${tendenciaPath}"></path>
+            ${tendencia.map(p => `<circle cx="${p.x}" cy="${p.y}" r="8"></circle>`).join("")}
+          </svg>
+          <div class="trend-axis">
+            ${tendencia.map(p => `<span>P${Number(p.pasillo)}</span>`).join("")}
+          </div>
+        </article>
       </section>
-      <section class="power-grid bottom">
-        <article class="power-card">
-          <div class="panel-head"><h2>Pasillos con mayor alerta</h2></div>
-          <div class="risk-list">
+      <section class="visual-bottom-grid">
+        <article class="power-card visual-alert-card compact-alerts">
+          <div class="panel-head"><h2>${icono("alerta")}Alertas</h2></div>
+          <div class="alert-chip-grid">
             ${topPasillos.map(p => `
-              <div class="risk-row">
-                <span>Pasillo ${Number(p.pasillo)}</span>
-                <div class="bar"><i style="width:${Math.min(100, m.incidencias.length ? p.incidencias / Math.max(...m.pasillos.map(x => x.incidencias), 1) * 100 : 0)}%"></i></div>
-                <strong>${fmt(p.incidencias)}</strong>
-              </div>
+              <span class="${p.incidencias ? "hot" : ""}">P${Number(p.pasillo)} <strong>${fmt(p.incidencias)}</strong></span>
             `).join("") || `<div class="empty">Sin incidencias.</div>`}
           </div>
         </article>
-        <article class="power-card status-mosaic">
-          <div class="mosaic ok"><span>OK</span><strong>${fmt(m.ok)}</strong></div>
-          <div class="mosaic falta"><span>Falta</span><strong>${fmt(m.falta)}</strong></div>
-          <div class="mosaic sobra"><span>Sobra</span><strong>${fmt(m.sobra)}</strong></div>
-          <div class="mosaic pendiente"><span>Pendiente</span><strong>${fmt(m.pendiente)}</strong></div>
+        <article class="power-card visual-total-card">
+          <div class="panel-head"><h2>${icono("total")}Distribucion de estado</h2></div>
+          <div class="state-share">
+            <div class="donut-md" style="background:${donutAvance}"><b>${fmt(m.total)}</b></div>
+            <div class="state-list">
+              <span><i class="ok"></i>OK <strong>${fmt(m.ok)}</strong></span>
+              <span><i class="falta"></i>Falta <strong>${fmt(m.falta)}</strong></span>
+              <span><i class="sobra"></i>Sobra <strong>${fmt(m.sobra)}</strong></span>
+              <span><i class="pendiente"></i>Pend. <strong>${fmt(m.pendiente)}</strong></span>
+            </div>
+          </div>
+        </article>
+        <article class="power-card visual-insights-card">
+          <div class="panel-head"><h2>${icono("avance")}Lectura rapida</h2></div>
+          <div class="insight-grid">
+            <span><b>Foco</b><strong>${focoAlerta ? `P${Number(focoAlerta.pasillo)}` : "-"}</strong><small>${fmt(focoAlerta?.incidencias || 0)} incidencias</small></span>
+            <span><b>Pendiente</b><strong>${focoPendiente ? `P${Number(focoPendiente.pasillo)}` : "-"}</strong><small>${fmt(focoPendiente?.pendiente || 0)} ubic.</small></span>
+            <span><b>Mejor</b><strong>${mejorPasillo ? `P${Number(mejorPasillo.pasillo)}` : "-"}</strong><small>${fmt(mejorPasillo?.avance || 0)}%</small></span>
+          </div>
         </article>
       </section>
     </main>
