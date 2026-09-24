@@ -1,7 +1,7 @@
 const CONFIG = {
   SHEET_ID: "1-v6vXjHpLlIn0-_lVZw0BtGopnxSHH0zqoOrW8aBwcg",
-  DEFAULT_API_URL: "https://script.google.com/macros/s/AKfycbyDIkA9grHHVGMEY5-R_qYpiYxY4XId_7ckrfEMs_adwFR7vHhPd2QtB6gjopZgK3BA0Q/exec",
-  API_STORAGE_KEY: "anc_inv_activo_api_url",
+  DEFAULT_API_URL: "https://script.google.com/macros/s/AKfycbxejkRx-rYNOAEGcjRKvjpVRMhOXU6ge1YA050pmhvkJQ-do_-g_70lFNkNhlmAnh7UeA/exec",
+  API_STORAGE_KEY: "anc_inv_activo_api_url_v2",
   VALIDACIONES_KEY: "anc_inv_activo_validaciones_v1",
   PENDING_SYNC_KEY: "anc_inv_activo_sync_pendiente_v1",
   LOCAL_RESET_AT_KEY: "anc_inv_activo_reset_at_v1",
@@ -29,6 +29,13 @@ let syncTimer = null;
 let filtroTimer = null;
 let mantenerFocoBusqueda = false;
 let dashboardModoReporte = false;
+let ajustesInv = [];
+let ajustePasilloActivo = "01";
+let ajusteFiltroTexto = "";
+let ajusteFiltroTimer = null;
+let mantenerFocoAjuste = false;
+let ajusteCargando = false;
+let modalAjusteInv = null;
 const ESTADO_GESTION_DEFAULT = "PENDIENTE";
 
 const USUARIOS = {
@@ -453,6 +460,105 @@ async function cargarDatos(forzar = false) {
   } finally {
     cargando = false;
   }
+}
+
+async function cargarAjustesInv() {
+  if (ajusteCargando) return;
+  ajusteCargando = true;
+  renderAjusteInv();
+  try {
+    const data = await apiGet({ action: "ajustes" });
+    ajustesInv = Array.isArray(data?.ajustes) ? data.ajustes : [];
+    const pasillos = pasillosAjusteDisponibles();
+    if (!pasillos.includes(ajustePasilloActivo)) ajustePasilloActivo = pasillos[0] || "01";
+  } catch (error) {
+    mostrarAviso(`No se pudo cargar Ajuste inv: ${error.message || error}`);
+  } finally {
+    ajusteCargando = false;
+    renderAjusteInv();
+  }
+}
+
+async function sincronizarTodo() {
+  await cargarDatos(true);
+  if (puedeAjusteInv()) await cargarAjustesInv();
+}
+
+function pasillosAjusteDisponibles() {
+  return Array.from(new Set(ajustesInv.map(item => parseUbicacion(item.ubicacion)?.pasillo).filter(p => p && p !== CONFIG.PASILLO_EXCLUIDO))).sort((a, b) => num(a) - num(b));
+}
+
+function uxbAjuste(producto) {
+  const codigo = normalizar(producto);
+  const desdeProducto = campo(productosIndex.get(codigo) || {}, ["UXB", "Uxb", "UNID_CAJA", "UND_CAJA"]);
+  const desdeActivo = inventario.find(row => normalizar(campo(row, ["PRODUCTO", "CODIGO", "Codigo"])) === codigo);
+  return num(desdeProducto) || num(campo(desdeActivo || {}, ["UXB", "Uxb", "UNID_CAJA", "UND_CAJA"])) || 1;
+}
+
+function filasAjusteInv() {
+  const q = normalizar(ajusteFiltroTexto);
+  return ajustesInv
+    .filter(item => (parseUbicacion(item.ubicacion)?.pasillo || "") === ajustePasilloActivo)
+    .filter(item => !q || [item.ubicacion, item.producto, item.descripcion].some(v => normalizar(v).includes(q)))
+    .sort((a, b) => compararUbicacion(a.ubicacion, b.ubicacion) || String(a.producto).localeCompare(String(b.producto)));
+}
+
+function actualizarFiltroAjuste(valor) {
+  ajusteFiltroTexto = valor;
+  mantenerFocoAjuste = true;
+  clearTimeout(ajusteFiltroTimer);
+  ajusteFiltroTimer = setTimeout(renderAjusteInv, 120);
+}
+
+function restaurarFocoAjuste() {
+  if (!mantenerFocoAjuste) return;
+  mantenerFocoAjuste = false;
+  requestAnimationFrame(() => {
+    const input = document.getElementById("buscadorAjusteInv");
+    if (!input) return;
+    input.focus();
+    const fin = input.value.length;
+    try { input.setSelectionRange(fin, fin); } catch {}
+  });
+}
+
+function abrirModalAjusteInv(ubicacion, producto) {
+  const item = ajustesInv.find(row => normalizar(row.ubicacion) === normalizar(ubicacion) && normalizar(row.producto) === normalizar(producto));
+  if (!item) return;
+  modalAjusteInv = { ...item };
+  renderAjusteInv();
+  requestAnimationFrame(() => document.getElementById("ajusteUniMax")?.focus());
+}
+
+function cerrarModalAjusteInv() {
+  modalAjusteInv = null;
+  renderAjusteInv();
+}
+
+function actualizarPreviewAjuste(valor, uxb) {
+  const preview = document.getElementById("ajusteUnidadesPreview");
+  if (preview) preview.textContent = fmt(num(valor) * (num(uxb) || 1));
+}
+
+async function guardarAjusteInv(event) {
+  event?.preventDefault();
+  if (!modalAjusteInv) return;
+  const uxb = uxbAjuste(modalAjusteInv.producto);
+  const maxBultos = num(document.getElementById("ajusteBultos")?.value);
+  const uniMax = maxBultos * uxb;
+  if (maxBultos < 0 || !Number.isFinite(uniMax)) return;
+  const registro = { ...modalAjusteInv, uxb, bultos: maxBultos, uniMax };
+  try {
+    await apiPost({ action: "guardar_ajuste", registro });
+    ajustesInv = ajustesInv.map(item => normalizar(item.ubicacion) === normalizar(registro.ubicacion) && normalizar(item.producto) === normalizar(registro.producto)
+      ? { ...item, uxb, bultos: maxBultos, uniMax, ajuste: "SI" }
+      : item);
+    modalAjusteInv = null;
+    mostrarAviso("Ajuste guardado correctamente.");
+  } catch (error) {
+    mostrarAviso(`No se pudo guardar: ${error.message || error}`);
+  }
+  renderAjusteInv();
 }
 
 function resumen() {
@@ -928,27 +1034,37 @@ function icono(tipo) {
     pendiente: `<circle cx="12" cy="12" r="8"></circle><path d="M12 8v5l3 2"></path>`,
     avance: `<path d="M4 19V5"></path><path d="M4 19h16"></path><path d="M7 15l3-4 3 2 5-7"></path>`,
     pasillo: `<path d="M5 4h14v16H5z"></path><path d="M9 4v16"></path><path d="M15 4v16"></path>`,
-    alerta: `<path d="M12 3l10 18H2L12 3z"></path><path d="M12 9v5"></path><path d="M12 17h.01"></path>`
+    alerta: `<path d="M12 3l10 18H2L12 3z"></path><path d="M12 9v5"></path><path d="M12 17h.01"></path>`,
+    ajuste: `<path d="M4 7h16"></path><path d="M7 4v6"></path><path d="M17 4v6"></path><path d="M4 13h16"></path><path d="M7 10v7"></path><path d="M17 10v7"></path><path d="M4 19h16"></path>`
   };
   return `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true">${paths[tipo] || paths.total}</svg>`;
+}
+
+function puedeAjusteInv() {
+  return sesion?.user === "celular";
 }
 
 function header(titulo, subtitulo, desktop = false) {
   const r = resumen();
   const vistaActual = sesion?.vista || new URL(location.href).searchParams.get("view") || "mobile";
+  const esAdmin = sesion?.user === "admin";
   return `
     <header class="top">
       <div class="top-row">
         <div class="brand"><h1>${titulo}</h1><span>${subtitulo}</span></div>
         <div class="nav-actions">
-          ${desktop ? `
+          ${desktop && esAdmin ? `
             <button class="icon-button ${vistaActual === "dashboard" ? "active" : ""}" onclick="abrirVista('dashboard')">${icono("dashboard")}<span>DASHBOARD</span></button>
             <button class="icon-button ${vistaActual === "monitor" ? "active" : ""}" onclick="abrirVista('monitor')">${icono("monitor")}<span>MONITOR</span></button>
             ${vistaActual === "dashboard" ? `<button class="icon-button" onclick="alternarVistaReporteDashboard()">${icono("avance")}<span>${dashboardModoReporte ? "VISTA NORMAL" : "VISTA REPORTE"}</span></button>` : ""}
           ` : ""}
+          ${puedeAjusteInv() ? `
+            <button class="icon-button ${vistaActual === "mobile" ? "active" : ""}" onclick="abrirVista('mobile')">${icono("total")}<span>INVENTARIO</span></button>
+            <button class="icon-button ${vistaActual === "ajuste" ? "active" : ""}" onclick="abrirVista('ajuste')">${icono("ajuste")}<span>AJUSTE INV</span></button>
+          ` : ""}
           <button class="icon-button danger" onclick="reiniciarAvance()">${icono("reset")}<span>REINICIAR</span></button>
           <button class="icon-button" onclick="cerrarSesion()">${icono("logout")}<span>SALIR</span></button>
-          <button class="icon-button" onclick="cargarDatos(true)">${icono("refresh")}<span>SYNC</span></button>
+          <button class="icon-button" onclick="sincronizarTodo()">${icono("refresh")}<span>SYNC</span></button>
         </div>
       </div>
       <div class="status-strip">
@@ -1177,6 +1293,80 @@ function renderDashboard() {
   `;
 }
 
+function modalAjusteInvHtml() {
+  if (!modalAjusteInv) return "";
+  const uxb = uxbAjuste(modalAjusteInv.producto);
+  return `
+    <div class="modal-backdrop" onclick="cerrarModalAjusteInv()">
+      <form class="qty-modal ajuste-modal" onclick="event.stopPropagation()" onsubmit="guardarAjusteInv(event)">
+        <header>
+          <span>${icono("ajuste")} Ajustar capacidad</span>
+          <button type="button" onclick="cerrarModalAjusteInv()">Cerrar</button>
+        </header>
+        <strong>${html(modalAjusteInv.ubicacion)}</strong>
+        <p>${html(modalAjusteInv.producto)} | ${html(modalAjusteInv.descripcion || "Sin descripcion")}</p>
+        <label>Capacidad maxima en bultos
+          <input id="ajusteBultos" type="number" min="0" step="0.01" inputmode="decimal" value="${html(num(modalAjusteInv.uniMax) / uxb)}" oninput="actualizarPreviewAjuste(this.value, ${uxb})">
+        </label>
+        <div class="adjustment-preview">Equivale a <strong id="ajusteUnidadesPreview">${fmt(num(modalAjusteInv.uniMax))}</strong> unidades | UXB ${fmt(uxb)}</div>
+        <button class="primary success" type="submit">Guardar ajuste</button>
+      </form>
+    </div>
+  `;
+}
+
+function renderAjusteInv() {
+  app.className = "app-shell";
+  const filas = filasAjusteInv();
+  const pasillos = Array.from({ length: 12 }, (_, index) => String(index + 1).padStart(2, "0")).filter(p => p !== CONFIG.PASILLO_EXCLUIDO);
+  app.innerHTML = `
+    ${header("Ajuste inventario", "Capacidad maxima por ubicacion")}
+    <main class="content ajuste-content">
+      ${avisoGuardado ? `<div class="save-toast">${html(avisoGuardado)}</div>` : ""}
+      <div class="ajuste-refresh-row">
+        <button class="primary" onclick="cargarAjustesInv()">${icono("refresh")} Actualizar</button>
+      </div>
+      <section class="panel ajuste-toolbar">
+        <div class="aisle-tabs ajuste-tabs">
+          ${pasillos.map(p => `<button class="${p === ajustePasilloActivo ? "active" : ""}" onclick="ajustePasilloActivo='${p}';renderAjusteInv()">P${Number(p)}</button>`).join("")}
+        </div>
+        <input id="buscadorAjusteInv" class="ajuste-search" value="${html(ajusteFiltroTexto)}" placeholder="Buscar ubicacion, producto o descripcion" autocomplete="off" oninput="actualizarFiltroAjuste(this.value)">
+      </section>
+      <section class="panel ajuste-table-panel">
+        <div class="panel-head">
+          <h2>${icono("pasillo")}Pasillo ${Number(ajustePasilloActivo)}</h2>
+          <span class="table-count">${fmt(filas.length)} registros</span>
+        </div>
+        ${ajusteCargando ? `<div class="loading">Cargando capacidades...</div>` : `
+          <div class="ajuste-cards">
+            ${filas.map(item => {
+              const partes = limpiar(item.ubicacion).split("-");
+              const uxb = uxbAjuste(item.producto);
+              const maxBultos = num(item.uniMax) / uxb;
+              return `<article class="ajuste-card">
+                <div class="ajuste-card-head">
+                  <div><strong>${html(item.ubicacion)}</strong><small>Bahia ${html(partes[2] || "-")} | Nivel ${html(partes[3] || "-")} | Col. ${html(partes[4] || "-")}</small></div>
+                  <span class="adjustment-state ${item.ajuste === "SI" ? "done" : "pending"}">${html(item.ajuste || "NO")}</span>
+                </div>
+                <strong class="ajuste-product">${html(item.producto)}</strong>
+                <p class="ajuste-description">${html(item.descripcion || "Sin descripcion")}</p>
+                <div class="metric-grid ajuste-metrics">
+                  <div class="metric"><span>UXB</span><strong>${fmt(uxb)}</strong></div>
+                  <div class="metric"><span>Max bultos</span><strong>${fmt(maxBultos)}</strong></div>
+                  <div class="metric"><span>Max unidades</span><strong>${fmt(item.uniMax)}</strong></div>
+                </div>
+                <button class="adjust-btn ajuste-action" onclick="abrirModalAjusteInv('${html(item.ubicacion)}','${html(item.producto)}')">${icono("ajuste")} Ajustar en bultos</button>
+              </article>`;
+            }).join("") || `<div class="empty">Sin ubicaciones para este filtro.</div>`}
+          </div>
+        `}
+      </section>
+    </main>
+    ${modalAjusteInvHtml()}
+  `;
+  restaurarFocoAjuste();
+}
+
 function renderMonitor() {
   app.className = "app-shell desktop";
   const r = resumen();
@@ -1239,6 +1429,7 @@ function renderMonitor() {
 }
 
 function abrirVista(vista) {
+  if (vista === "ajuste" && !puedeAjusteInv()) return;
   const url = new URL(location.href);
   url.searchParams.set("view", vista);
   history.replaceState(null, "", url);
@@ -1247,6 +1438,7 @@ function abrirVista(vista) {
     guardarSesion(sesion);
   }
   render();
+  if (vista === "ajuste" && !ajustesInv.length) cargarAjustesInv();
 }
 
 function render() {
@@ -1254,6 +1446,7 @@ function render() {
   const vista = sesion.vista || new URL(location.href).searchParams.get("view") || "mobile";
   if (vista === "dashboard") renderDashboard();
   else if (vista === "monitor") renderMonitor();
+  else if (vista === "ajuste" && puedeAjusteInv()) renderAjusteInv();
   else renderMobile();
 }
 
@@ -1276,7 +1469,8 @@ if (sesion) {
   const url = new URL(location.href);
   url.searchParams.set("view", sesion.vista || "mobile");
   history.replaceState(null, "", url);
-  cargarDatos();
+  const inicio = cargarDatos();
+  if (sesion.vista === "ajuste") inicio.then(() => cargarAjustesInv());
 } else {
   renderLogin();
 }
